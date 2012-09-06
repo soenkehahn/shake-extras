@@ -34,46 +34,59 @@ import Development.Shake
 import Development.Shake.FilePath
 
 
+-- * utilities
+
+dropBuildDir :: FilePath -> FilePath -> FilePath
+dropBuildDir buildDir f =
+    dropWhileEqual (splitDirectories buildDir) (splitDirectories f)
+  where
+    dropWhileEqual (a : ra) (b : rb) =
+        if a == b then dropWhileEqual ra rb else
+        error ("dropBuildDir: " ++ f ++ " does not start with " ++ buildDir)
+    dropWhileEqual [] b = joinPath b
+
 -- * querying imports of a file
 
 -- | Searches for imports in a file. Before compiling, you still have to 'need' the imports.
-directImports :: FilePath -> Action [FilePath]
-directImports file =
-    lines <$> readFile' (file <.> "directImports")
+directImports :: FilePath -> FilePath -> Action [FilePath]
+directImports buildDir file =
+    lines <$> readFile' (buildDir </> file <.> "directImports")
 
 -- | Searches for transitive imports in a file. This might be useful for linking.
-transitiveImports :: FilePath -> Action [FilePath]
-transitiveImports file =
-    lines <$> readFile' (file <.> "transitiveImports")
+transitiveImports :: FilePath -> FilePath -> Action [FilePath]
+transitiveImports buildDir file =
+    lines <$> readFile' (buildDir </> file <.> "transitiveImports")
 
 
 -- * declaring rules
 
 -- | @importsRule p searchImports@ registers a rule for how to look up imports
 -- for files matching p.
-importsRule :: (FilePath -> Bool)
+importsRule :: FilePath -> (FilePath -> Bool)
     -> (FilePath -> Action [FilePath])
     -> Rules ()
-importsRule ruleApplies getDirectDependencies = do
+importsRule buildDir ruleApplies getDirectDependencies = do
 
     let isDirectImportKey file =
-            ("//*.directImports" ?== file) &&
+            ((dropTrailingPathSeparator buildDir ++ "//*.directImports") ?== file) &&
             ruleApplies (dropExtension file)
 
     isDirectImportKey ?> \ importsFile -> do
-        let sourceFile = dropExtension importsFile
+        let sourceFile = dropBuildDir buildDir $ dropExtension importsFile
         directImports' <- getDirectDependencies sourceFile
         writeFileChanged importsFile (unlines directImports')
 
     let isTransitiveImportKey file =
-            ("//*.transitiveImports" ?== file) &&
+            ((dropTrailingPathSeparator buildDir ++ "//*.transitiveImports") ?== file) &&
             ruleApplies (dropExtension file)
 
     isTransitiveImportKey ?> \ transitiveImportsFile -> do
         let directImportsFile = replaceExtension transitiveImportsFile ".directImports"
         directImports' :: [FilePath] <- readFileLines directImportsFile
         transitiveImports' <- concat <$> mapM readFileLines
-                            (map (<.> ".transitiveImports") directImports')
+                            (map
+                                (\ f -> buildDir </> f <.> ".transitiveImports")
+                                directImports')
         writeFileChanged transitiveImportsFile
             (unlines $ nub $ directImports' ++ transitiveImports')
 
@@ -86,9 +99,9 @@ importsRule ruleApplies getDirectDependencies = do
 -- | Registers a defaultRule for imports in haskell source files (\".hs\").
 -- Only returns the imported files that are found
 -- on disk in one of the directories specified by the first argument.
-importsDefaultHaskell :: [FilePath] -> Rules ()
-importsDefaultHaskell sourceDirs =
-    importsRule ("//*.hs" ?==) (getHaskellDependencies sourceDirs)
+importsDefaultHaskell :: FilePath -> [FilePath] -> Rules ()
+importsDefaultHaskell buildDir sourceDirs =
+    importsRule buildDir ("//*.hs" ?==) (getHaskellDependencies sourceDirs)
   where
     getHaskellDependencies :: [FilePath] -> FilePath -> Action [FilePath]
     getHaskellDependencies source file =
@@ -113,9 +126,9 @@ importsDefaultHaskell sourceDirs =
 -- | Registers a defaultRule for imports in C++ source files (\".cpp\").
 -- Only returns the imported files that are found
 -- on disk in one of the directories specified by the first argument.
-importsDefaultCpp :: [FilePath] -> Rules ()
-importsDefaultCpp sourceDirs =
-    importsRule ("//*.cpp" ?==) getDependencies
+importsDefaultCpp :: FilePath -> [FilePath] -> Rules ()
+importsDefaultCpp buildDir sourceDirs =
+    importsRule buildDir ("//*.cpp" ?==) getDependencies
   where
     getDependencies file =
         readFile' file >>=
